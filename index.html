@@ -1,85 +1,359 @@
-<?php
-// includes/auth.php — Autenticación simple (contraseñas en texto plano para entorno escolar)
-mb_internal_encoding('UTF-8');
-require_once __DIR__ . '/db.php';
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, initial-scale=1">
+<title>Canales Abiertos TV</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; color: #fff;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
 
-function iniciarSesionSegura(): void
-{
-    if (session_status() === PHP_SESSION_NONE) {
-        session_set_cookie_params([
-            'lifetime' => 0,
-            'path'     => '/',
-            'httponly' => true,
-            'samesite' => 'Strict',
-        ]);
-        session_start();
+  /* Panel lateral de canales */
+  #panel { position: absolute; top: 0; left: 0; width: 620px; height: 100%;
+    background: linear-gradient(90deg, rgba(10,12,20,.97) 80%, rgba(10,12,20,.0));
+    padding: 40px 30px 30px 40px; transition: transform .25s ease; display: flex; flex-direction: column; }
+  #panel.oculto { transform: translateX(-660px); }
+  #titulo { font-size: 40px; font-weight: 700; margin-bottom: 6px; }
+  #titulo span { color: #3fa9ff; }
+  #grupo { font-size: 24px; color: #9ab; margin-bottom: 18px; height: 34px; }
+  #grupo b { color: #fff; }
+  #lista { list-style: none; flex: 1; overflow: hidden; position: relative; }
+  #lista li { display: flex; align-items: center; gap: 18px; height: 78px; padding: 0 18px;
+    border-radius: 12px; font-size: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #lista li .num { width: 60px; color: #789; font-size: 24px; text-align: right; flex: none; }
+  #lista li img { width: 64px; height: 48px; object-fit: contain; flex: none; background: rgba(255,255,255,.06); border-radius: 6px; }
+  #lista li .nombre { overflow: hidden; text-overflow: ellipsis; }
+  #lista li.sel { background: #1e6fd9; }
+  #lista li.activo .nombre::after { content: "  ●"; color: #4f4; }
+  #ayuda { font-size: 20px; color: #789; margin-top: 14px; line-height: 1.5; }
+
+  /* Banner del canal actual */
+  #banner { position: absolute; left: 50%; bottom: 60px; transform: translateX(-50%);
+    background: rgba(10,12,20,.88); padding: 22px 40px; border-radius: 16px; font-size: 34px;
+    display: flex; gap: 24px; align-items: center; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #banner.ver { opacity: 1; }
+  #banner .num { color: #3fa9ff; font-weight: 700; }
+  #estado { position: absolute; top: 40px; right: 50px; font-size: 26px; background: rgba(0,0,0,.7);
+    padding: 12px 24px; border-radius: 10px; display: none; }
+
+  /* Barra de botones en pantalla (para el puntero del navegador) */
+  #barra { position: absolute; right: 50px; bottom: 50px; display: flex; gap: 20px;
+    transition: opacity .3s; }
+  #barra.oculta { opacity: 0; pointer-events: none; }
+  .btn { min-width: 200px; height: 130px; font-size: 34px; font-weight: 700; color: #fff;
+    background: rgba(20,30,50,.92); border: 4px solid #3fa9ff; border-radius: 22px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; padding: 0 30px; }
+  .btn:hover, .btn:focus { background: #1e6fd9; outline: none; transform: scale(1.06); }
+  #pagBtns { display: flex; gap: 16px; margin-top: 14px; }
+  #pagBtns .btn { min-width: 0; flex: 1; height: 90px; font-size: 30px; }
+  #lista li { cursor: pointer; }
+  #lista li:hover { background: rgba(63,169,255,.35); }
+  #zonaToque { position: absolute; inset: 0; }
+
+  /* Ajustes */
+  #ajustes { position: absolute; inset: 0; background: rgba(0,0,0,.92); display: none;
+    flex-direction: column; align-items: center; justify-content: center; gap: 28px; }
+  #ajustes.ver { display: flex; }
+  #ajustes h2 { font-size: 44px; }
+  #ajustes p { font-size: 24px; color: #9ab; max-width: 1300px; text-align: center; }
+  #ajustes input { width: 1300px; font-size: 28px; padding: 18px 22px; border-radius: 10px; border: 3px solid #345;
+    background: #111; color: #fff; }
+  #ajustes .botones { display: flex; gap: 24px; }
+  #ajustes button { font-size: 28px; padding: 16px 40px; border-radius: 10px; border: 3px solid #345; background: #1a2230; color: #fff; }
+  #ajustes .foco { border-color: #3fa9ff !important; background: #1e6fd9; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline></video>
+<div id="zonaToque"></div>
+
+<div id="panel">
+  <div id="titulo">Canales <span>Abiertos</span></div>
+  <div id="grupo"></div>
+  <ul id="lista"></ul>
+  <div id="pagBtns">
+    <button class="btn" id="bGrupoAnt" tabindex="0">◀ Cat.</button>
+    <button class="btn" id="bArriba" tabindex="0">▲</button>
+    <button class="btn" id="bAbajo" tabindex="0">▼</button>
+    <button class="btn" id="bGrupoSig" tabindex="0">Cat. ▶</button>
+  </div>
+  <div id="ayuda">Usa el puntero: haz clic en un canal para verlo.</div>
+</div>
+
+<div id="barra">
+  <button class="btn" id="bAnt" tabindex="0">◀ CH −</button>
+  <button class="btn" id="bLista" tabindex="0">☰ Canales</button>
+  <button class="btn" id="bSig" tabindex="0">CH + ▶</button>
+  <button class="btn" id="bAjustes" tabindex="0" style="min-width:130px">⚙</button>
+</div>
+
+<div id="banner"><span class="num"></span><span class="nom"></span></div>
+<div id="estado"></div>
+
+<div id="ajustes">
+  <h2>Ajustes de lista</h2>
+  <p>Escribe la URL de una lista M3U de canales que tengas derecho a ver (por ejemplo, transmisiones oficiales y gratuitas de las propias televisoras).</p>
+  <input id="urlInput" type="text" spellcheck="false">
+  <div class="botones">
+    <button id="btnGuardar">Guardar y cargar</button>
+    <button id="btnDefecto">Lista por defecto</button>
+    <button id="btnCerrar">Cerrar</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ====== CONFIGURACIÓN ======
+  // Lista por defecto: canales de México del proyecto público iptv-org (solo enlaces de acceso libre).
+  var LISTA_DEFECTO = "https://iptv-org.github.io/iptv/countries/mx.m3u";
+  var FILAS_VISIBLES = 11;
+
+  // ====== Estado ======
+  var canales = [], grupos = ["Todos"], grupoIdx = 0, filtrados = [];
+  var sel = 0, activo = -1, hls = null, timerPanel = null, timerBanner = null, numBuffer = "", timerNum = null;
+  var video = document.getElementById("video");
+  var panel = document.getElementById("panel");
+  var lista = document.getElementById("lista");
+  var grupoEl = document.getElementById("grupo");
+  var banner = document.getElementById("banner");
+  var estado = document.getElementById("estado");
+  var ajustes = document.getElementById("ajustes");
+  var urlInput = document.getElementById("urlInput");
+  var focoAjustes = 0;
+  var elemsAjustes = [urlInput, document.getElementById("btnGuardar"), document.getElementById("btnDefecto"), document.getElementById("btnCerrar")];
+
+  function leer(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }
+  function guardar(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+  function mostrarEstado(t, ms) {
+    estado.textContent = t; estado.style.display = "block";
+    clearTimeout(mostrarEstado._t);
+    if (ms) mostrarEstado._t = setTimeout(function () { estado.style.display = "none"; }, ms);
+  }
+
+  // ====== Parser M3U ======
+  function parsearM3U(texto) {
+    var lineas = texto.split(/\r?\n/), res = [], info = null;
+    for (var i = 0; i < lineas.length; i++) {
+      var l = lineas[i].trim();
+      if (!l) continue;
+      if (l.indexOf("#EXTINF") === 0) {
+        var attr = function (n) { var m = l.match(new RegExp(n + '="([^"]*)"')); return m ? m[1] : ""; };
+        var coma = l.lastIndexOf(",");
+        info = { nombre: coma >= 0 ? l.slice(coma + 1).trim() : "Canal", logo: attr("tvg-logo"),
+                 grupo: (attr("group-title") || "Otros").split(";")[0] };
+      } else if (l[0] !== "#" && info) {
+        info.url = l; res.push(info); info = null;
+      }
     }
-}
+    return res;
+  }
 
-function requireRol(string ...$roles): void
-{
-    iniciarSesionSegura();
-    if (empty($_SESSION['usuario_id'])) {
-        header('Location: ' . base_url('index.php?error=sesion'));
-        exit;
+  function cargarLista(url) {
+    mostrarEstado("Cargando canales…");
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", url, true);
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        canales = parsearM3U(xhr.responseText);
+        var g = {}; canales.forEach(function (c) { g[c.grupo] = 1; });
+        grupos = ["Todos"].concat(Object.keys(g).sort());
+        grupoIdx = 0; aplicarFiltro();
+        mostrarEstado(canales.length + " canales cargados", 2500);
+        var ultimo = parseInt(leer("ultimoCanal", "0"), 10) || 0;
+        if (filtrados.length) { sel = Math.min(ultimo, filtrados.length - 1); reproducir(sel); }
+        mostrarPanel();
+      } else mostrarEstado("Error al cargar la lista (" + xhr.status + ")");
+    };
+    xhr.onerror = function () { mostrarEstado("No se pudo descargar la lista. Revisa la URL o tu conexión."); };
+    xhr.send();
+  }
+
+  function aplicarFiltro() {
+    var g = grupos[grupoIdx];
+    filtrados = g === "Todos" ? canales : canales.filter(function (c) { return c.grupo === g; });
+    sel = 0; pintarLista();
+  }
+
+  // ====== Render ======
+  function pintarLista() {
+    grupoEl.innerHTML = "◀ <b>" + grupos[grupoIdx] + "</b> ▶ &nbsp;(" + filtrados.length + ")";
+    var inicio = Math.max(0, Math.min(sel - Math.floor(FILAS_VISIBLES / 2), filtrados.length - FILAS_VISIBLES));
+    var html = "";
+    for (var i = inicio; i < Math.min(filtrados.length, inicio + FILAS_VISIBLES); i++) {
+      var c = filtrados[i];
+      var cls = (i === sel ? "sel " : "") + (c === canales[activo] ? "activo" : "");
+      html += '<li tabindex="0" data-i="' + i + '" class="' + cls + '"><span class="num">' + (canales.indexOf(c) + 1) + '</span>' +
+        (c.logo ? '<img src="' + esc(c.logo) + '" onerror="this.style.visibility=\'hidden\'">' : '<img style="visibility:hidden">') +
+        '<span class="nombre">' + esc(c.nombre) + '</span></li>';
     }
-    if (!in_array($_SESSION['rol'], $roles, true)) {
-        header('Location: ' . base_url('index.php?error=acceso'));
-        exit;
+    lista.innerHTML = html || '<li>Sin canales</li>';
+  }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (m) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]; }); }
+
+  function mostrarPanel() {
+    panel.classList.remove("oculto");
+    clearTimeout(timerPanel);
+    timerPanel = setTimeout(ocultarPanel, 8000);
+  }
+  function ocultarPanel() { panel.classList.add("oculto"); }
+
+  function mostrarBanner(c) {
+    banner.querySelector(".num").textContent = canales.indexOf(c) + 1;
+    banner.querySelector(".nom").textContent = c.nombre;
+    banner.classList.add("ver");
+    clearTimeout(timerBanner);
+    timerBanner = setTimeout(function () { banner.classList.remove("ver"); }, 3500);
+  }
+
+  // ====== Reproducción ======
+  function reproducir(i) {
+    var c = filtrados[i]; if (!c) return;
+    activo = canales.indexOf(c);
+    guardar("ultimoCanal", String(i));
+    if (hls) { hls.destroy(); hls = null; }
+    mostrarEstado("Conectando a " + c.nombre + "…");
+    var esHls = /\.m3u8(\?|$)/i.test(c.url);
+    if (esHls && window.Hls && Hls.isSupported()) {
+      hls = new Hls({ maxBufferLength: 20, enableWorker: true });
+      hls.loadSource(c.url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, function () { video.play(); });
+      hls.on(Hls.Events.ERROR, function (e, d) {
+        if (d.fatal) {
+          if (d.type === Hls.ErrorTypes.NETWORK_ERROR) mostrarEstado("Canal no disponible ahora", 4000);
+          else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+          else mostrarEstado("Error de reproducción", 4000);
+        }
+      });
+    } else {
+      video.src = c.url; // HLS nativo del navegador o MP4
+      video.play();
     }
-}
+    mostrarBanner(c); pintarLista();
+  }
+  video.addEventListener("playing", function () { estado.style.display = "none"; });
+  video.addEventListener("error", function () { mostrarEstado("Canal no disponible ahora", 4000); });
 
-// Devuelve la URL base del proyecto (compatible con php -S y Apache/Nginx)
-function base_url(string $path = ''): string
-{
-    $script = $_SERVER['SCRIPT_NAME'] ?? '';
-    // Detectar carpeta raíz del proyecto
-    $base = rtrim(dirname(dirname($script)), '/\\');
-    if ($base === '.' || $base === '') $base = '';
-    return $base . '/' . ltrim($path, '/');
-}
+  function cambiarCanal(d) {
+    if (!filtrados.length) return;
+    var actualEnFiltro = filtrados.indexOf(canales[activo]);
+    var n = ((actualEnFiltro < 0 ? sel : actualEnFiltro) + d + filtrados.length) % filtrados.length;
+    sel = n; reproducir(n);
+  }
 
-function login(string $usuario, string $password): array|false
-{
-    $db   = getDB();
-    $stmt = $db->prepare(
-        'SELECT id, nombre, usuario, password, rol, activo FROM usuarios WHERE usuario = ? LIMIT 1'
-    );
-    $stmt->execute([$usuario]);
-    $user = $stmt->fetch();
+  // Ir a canal por número (teclas 1-9)
+  function teclaNumero(n) {
+    numBuffer += n; mostrarEstado("Canal " + numBuffer);
+    clearTimeout(timerNum);
+    timerNum = setTimeout(function () {
+      var idx = parseInt(numBuffer, 10) - 1; numBuffer = "";
+      if (canales[idx]) { grupoIdx = 0; aplicarFiltro(); sel = idx; reproducir(idx); }
+      else mostrarEstado("No existe ese canal", 2000);
+    }, 1500);
+  }
 
-    if (!$user || !$user['activo']) return false;
+  // ====== Ajustes ======
+  function abrirAjustes() {
+    urlInput.value = leer("listaURL", LISTA_DEFECTO);
+    ajustes.classList.add("ver"); focoAjustes = 1; pintarFoco();
+  }
+  function cerrarAjustes() { ajustes.classList.remove("ver"); urlInput.blur(); }
+  function pintarFoco() {
+    elemsAjustes.forEach(function (e, i) { e.classList.toggle("foco", i === focoAjustes); });
+    if (focoAjustes === 0) urlInput.focus(); else urlInput.blur();
+  }
+  function accionAjustes() {
+    if (focoAjustes === 0) { urlInput.focus(); return; }
+    if (focoAjustes === 1) { guardar("listaURL", urlInput.value.trim()); cerrarAjustes(); cargarLista(urlInput.value.trim()); }
+    if (focoAjustes === 2) { guardar("listaURL", LISTA_DEFECTO); cerrarAjustes(); cargarLista(LISTA_DEFECTO); }
+    if (focoAjustes === 3) cerrarAjustes();
+  }
+  elemsAjustes.forEach(function (e, i) { e.addEventListener("click", function () { focoAjustes = i; accionAjustes(); }); });
 
-    // Comparación directa (texto plano) — para entorno educativo local
-    if ($user['password'] !== $password) return false;
+  // ====== Control remoto ======
+  // Códigos comunes en VIDAA/Hisense y navegadores TV
+  var K = { UP: 38, DOWN: 40, LEFT: 37, RIGHT: 39, OK: 13, BACK: [8, 27, 461, 10009],
+            CH_UP: [33, 427], CH_DOWN: [34, 428], RED: [403, 82], ZERO: 48 };
+  function es(code, lista) { return lista.indexOf(code) >= 0; }
 
-    return $user;
-}
+  document.addEventListener("keydown", function (e) {
+    var k = e.keyCode;
 
-function crearSesion(array $user): void
-{
-    iniciarSesionSegura();
-    session_regenerate_id(true);
-    $_SESSION['usuario_id'] = $user['id'];
-    $_SESSION['nombre']     = $user['nombre'];
-    $_SESSION['rol']        = $user['rol'];
-}
+    if (ajustes.classList.contains("ver")) {
+      if (focoAjustes === 0 && k !== K.UP && k !== K.DOWN && k !== K.OK && !es(k, [27, 461, 10009])) return; // escribir
+      if (k === K.DOWN || k === K.RIGHT) focoAjustes = Math.min(3, focoAjustes + 1);
+      else if (k === K.UP || k === K.LEFT) focoAjustes = Math.max(0, focoAjustes - 1);
+      else if (k === K.OK) accionAjustes();
+      else if (es(k, K.BACK)) cerrarAjustes();
+      pintarFoco(); e.preventDefault(); return;
+    }
 
-function logout(): void
-{
-    iniciarSesionSegura();
-    session_unset();
-    session_destroy();
-    header('Location: ' . base_url('sistema_secundaria/index.php'));
-    exit;
-}
+    var panelVisible = !panel.classList.contains("oculto");
+    if (k >= 49 && k <= 57) { teclaNumero(String(k - 48)); e.preventDefault(); return; }
 
-function usuarioActual(): array
-{
-    iniciarSesionSegura();
-    return [
-        'id'     => $_SESSION['usuario_id'] ?? 0,
-        'nombre' => $_SESSION['nombre']     ?? '',
-        'rol'    => $_SESSION['rol']        ?? '',
-    ];
-}
+    if (k === K.UP) { if (!panelVisible) mostrarPanel(); else { sel = Math.max(0, sel - 1); pintarLista(); mostrarPanel(); } }
+    else if (k === K.DOWN) { if (!panelVisible) mostrarPanel(); else { sel = Math.min(filtrados.length - 1, sel + 1); pintarLista(); mostrarPanel(); } }
+    else if (k === K.LEFT) { grupoIdx = (grupoIdx - 1 + grupos.length) % grupos.length; aplicarFiltro(); mostrarPanel(); }
+    else if (k === K.RIGHT) { grupoIdx = (grupoIdx + 1) % grupos.length; aplicarFiltro(); mostrarPanel(); }
+    else if (k === K.OK) { if (panelVisible) { reproducir(sel); ocultarPanel(); } else mostrarPanel(); }
+    else if (es(k, K.CH_UP)) cambiarCanal(1);
+    else if (es(k, K.CH_DOWN)) cambiarCanal(-1);
+    else if (es(k, K.RED) || k === K.ZERO) abrirAjustes();
+    else if (es(k, K.BACK)) { if (panelVisible) ocultarPanel(); else return; } // deja salir de la app
+    else return;
+    e.preventDefault();
+  });
+
+  // ====== Puntero / clic (navegador de la TV) ======
+  var barra = document.getElementById("barra"), timerBarra = null;
+  function mostrarBarra() {
+    barra.classList.remove("oculta");
+    clearTimeout(timerBarra);
+    timerBarra = setTimeout(function () { barra.classList.add("oculta"); }, 10000);
+  }
+  function enClic(id, fn) {
+    var el = document.getElementById(id);
+    el.addEventListener("click", function (e) { e.stopPropagation(); fn(); mostrarBarra(); });
+  }
+  enClic("bAnt", function () { cambiarCanal(-1); });
+  enClic("bSig", function () { cambiarCanal(1); });
+  enClic("bLista", function () { if (panel.classList.contains("oculto")) mostrarPanel(); else ocultarPanel(); });
+  enClic("bAjustes", abrirAjustes);
+  enClic("bArriba", function () { sel = Math.max(0, sel - (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
+  enClic("bAbajo", function () { sel = Math.min(filtrados.length - 1, sel + (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
+  enClic("bGrupoAnt", function () { grupoIdx = (grupoIdx - 1 + grupos.length) % grupos.length; aplicarFiltro(); mostrarPanel(); });
+  enClic("bGrupoSig", function () { grupoIdx = (grupoIdx + 1) % grupos.length; aplicarFiltro(); mostrarPanel(); });
+
+  // Clic en cualquier parte del video: muestra/oculta los botones
+  document.getElementById("zonaToque").addEventListener("click", function () {
+    if (barra.classList.contains("oculta")) mostrarBarra(); else barra.classList.add("oculta");
+  });
+  // Mover el puntero muestra los botones; mientras esté sobre la lista, no se oculta
+  document.addEventListener("mousemove", mostrarBarra);
+  panel.addEventListener("mousemove", function () { mostrarPanel(); });
+  // Rueda del ratón para recorrer la lista
+  panel.addEventListener("wheel", function (e) {
+    sel = Math.max(0, Math.min(filtrados.length - 1, sel + (e.deltaY > 0 ? 1 : -1)));
+    pintarLista(); mostrarPanel(); e.preventDefault();
+  });
+
+  // Clic en un canal de la lista
+  lista.addEventListener("click", function (e) {
+    var li = e.target;
+    while (li && li.tagName !== "LI") li = li.parentNode;
+    if (!li || li.getAttribute("data-i") === null) return;
+    sel = parseInt(li.getAttribute("data-i"), 10);
+    reproducir(sel); mostrarPanel();
+  });
+
+  // ====== Inicio ======
+  cargarLista(leer("listaURL", LISTA_DEFECTO));
+  mostrarBarra();
+})();
+</script>
+</body>
+</html>
