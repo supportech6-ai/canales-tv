@@ -159,9 +159,7 @@
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) {
         canales = parsearM3U(xhr.responseText);
-        var g = {}; canales.forEach(function (c) { g[c.grupo] = 1; });
-        grupos = ["Todos"].concat(Object.keys(g).sort());
-        grupoIdx = 0; aplicarFiltro();
+        grupoIdx = 0; rehacerGrupos();
         mostrarEstado(canales.length + " canales cargados", 2500);
         var ultimo = parseInt(leer("ultimoCanal", "0"), 10) || 0;
         if (filtrados.length) { sel = Math.min(ultimo, filtrados.length - 1); reproducir(sel); }
@@ -170,6 +168,13 @@
     };
     xhr.onerror = function () { mostrarEstado("No se pudo descargar la lista. Revisa la URL o tu conexión."); };
     xhr.send();
+  }
+
+  function rehacerGrupos() {
+    var g = {}; canales.forEach(function (c) { g[c.grupo] = 1; });
+    grupos = ["Todos"].concat(Object.keys(g).sort());
+    if (grupoIdx >= grupos.length) grupoIdx = 0;
+    aplicarFiltro();
   }
 
   function aplicarFiltro() {
@@ -210,31 +215,116 @@
   }
 
   // ====== Reproducción ======
+  // Configuración pensada para TVs con poca memoria y transmisiones largas:
+  // - backBufferLength: libera el video ya visto (evita que la memoria se llene y empiecen las pausas)
+  // - liveSyncDurationCount: reproduce un poco más atrás del "en vivo" para tener colchón
+  // - reintentos altos ante cortes de red
+  var CONFIG_HLS = {
+    enableWorker: true,
+    lowLatencyMode: false,
+    maxBufferLength: 30,
+    maxMaxBufferLength: 60,
+    maxBufferSize: 40 * 1000 * 1000,
+    backBufferLength: 20,
+    maxBufferHole: 0.5,
+    nudgeMaxRetry: 10,
+    liveSyncDurationCount: 4,
+    liveMaxLatencyDurationCount: 12,
+    capLevelToPlayerSize: true,
+    abrEwmaDefaultEstimate: 1500000,
+    abrBandWidthFactor: 0.8,
+    abrBandWidthUpFactor: 0.6,
+    manifestLoadingMaxRetry: 6,
+    levelLoadingMaxRetry: 8,
+    fragLoadingMaxRetry: 8,
+    fragLoadingRetryDelay: 1000
+  };
+
+  var canalActual = null, reintentosRed = 0, ultimoTiempo = 0, segundosAtorado = 0, nivelRescate = 0;
+
   function reproducir(i) {
     var c = filtrados[i]; if (!c) return;
     activo = canales.indexOf(c);
     guardar("ultimoCanal", String(i));
+    canalActual = c; reintentosRed = 0; nivelRescate = 0;
+    iniciarStream(c);
+    mostrarBanner(c); pintarLista();
+  }
+
+  function iniciarStream(c) {
     if (hls) { hls.destroy(); hls = null; }
     mostrarEstado("Conectando a " + c.nombre + "…");
+    ultimoTiempo = 0; segundosAtorado = 0;
     var esHls = /\.m3u8(\?|$)/i.test(c.url);
     if (esHls && window.Hls && Hls.isSupported()) {
-      hls = new Hls({ maxBufferLength: 20, enableWorker: true });
+      hls = new Hls(CONFIG_HLS);
       hls.loadSource(c.url);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, function () { video.play(); });
+      hls.on(Hls.Events.MANIFEST_PARSED, function () { intentarPlay(); });
+      hls.on(Hls.Events.FRAG_LOADED, function () { reintentosRed = 0; });
       hls.on(Hls.Events.ERROR, function (e, d) {
-        if (d.fatal) {
-          if (d.type === Hls.ErrorTypes.NETWORK_ERROR) mostrarEstado("Canal no disponible ahora", 4000);
-          else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-          else mostrarEstado("Error de reproducción", 4000);
+        if (!d.fatal) return;
+        if (d.type === Hls.ErrorTypes.NETWORK_ERROR && reintentosRed < 15) {
+          reintentosRed++;
+          mostrarEstado("Reconectando… (" + reintentosRed + ")");
+          setTimeout(function () { if (hls) hls.startLoad(); }, Math.min(1000 * reintentosRed, 5000));
+        } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        } else {
+          mostrarEstado("Reiniciando canal…");
+          setTimeout(function () { if (canalActual) iniciarStream(canalActual); }, 2000);
         }
       });
     } else {
       video.src = c.url; // HLS nativo del navegador o MP4
-      video.play();
+      intentarPlay();
     }
-    mostrarBanner(c); pintarLista();
   }
+
+  function intentarPlay() {
+    var p = video.play();
+    if (p && p.catch) p.catch(function () {});
+  }
+
+  // Indicadores de carga
+  video.addEventListener("waiting", function () { mostrarEstado("Cargando…"); });
+  video.addEventListener("playing", function () { estado.style.display = "none"; nivelRescate = 0; });
+
+  // ====== Vigilante anti-pausas ======
+  // Cada segundo revisa si el video avanzó. Si se queda atorado, lo rescata por pasos:
+  // 1) saltar al punto "en vivo"  2) recargar fragmentos  3) reiniciar el canal completo
+  setInterval(function () {
+    if (!canalActual || video.paused && video.readyState > 2) return;
+    var t = video.currentTime;
+    if (Math.abs(t - ultimoTiempo) < 0.05) segundosAtorado++;
+    else { segundosAtorado = 0; ultimoTiempo = t; return; }
+    ultimoTiempo = t;
+
+    if (segundosAtorado === 4) {
+      nivelRescate++;
+      if (nivelRescate === 1) {
+        // Saltar al punto en vivo o brincar el hueco del búfer
+        if (hls && hls.liveSyncPosition) video.currentTime = hls.liveSyncPosition;
+        else if (video.buffered.length) video.currentTime = video.buffered.end(video.buffered.length - 1) - 2;
+        intentarPlay();
+      } else if (nivelRescate === 2 && hls) {
+        hls.stopLoad(); hls.startLoad(-1); intentarPlay();
+      } else {
+        mostrarEstado("Reiniciando canal…");
+        iniciarStream(canalActual);
+        nivelRescate = 0;
+      }
+      segundosAtorado = 0;
+    }
+  }, 1000);
+
+  // Si la TV pone la pestaña en segundo plano y regresa, retomar en vivo
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && canalActual) {
+      if (hls && hls.liveSyncPosition) video.currentTime = hls.liveSyncPosition;
+      intentarPlay();
+    }
+  });
   video.addEventListener("playing", function () { estado.style.display = "none"; });
   video.addEventListener("error", function () { mostrarEstado("Canal no disponible ahora", 4000); });
 
@@ -285,7 +375,7 @@
 
     if (ajustes.classList.contains("ver")) {
       if (focoAjustes === 0 && k !== K.UP && k !== K.DOWN && k !== K.OK && !es(k, [27, 461, 10009])) return; // escribir
-      if (k === K.DOWN || k === K.RIGHT) focoAjustes = Math.min(3, focoAjustes + 1);
+      if (k === K.DOWN || k === K.RIGHT) focoAjustes = Math.min(elemsAjustes.length - 1, focoAjustes + 1);
       else if (k === K.UP || k === K.LEFT) focoAjustes = Math.max(0, focoAjustes - 1);
       else if (k === K.OK) accionAjustes();
       else if (es(k, K.BACK)) cerrarAjustes();
