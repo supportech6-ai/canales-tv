@@ -107,7 +107,8 @@
   <input id="urlInput" type="text" spellcheck="false">
   <div class="botones">
     <button id="btnGuardar">Guardar y cargar</button>
-    <button id="btnDefecto">Listas por defecto</button>
+    <button id="btnDefecto">Listas en español</button>
+    <button id="btnMundial">Todo el mundo</button>
     <button id="btnReiniciar">Volver a revisar todos</button>
     <button id="btnCerrar">Cerrar</button>
   </div>
@@ -118,10 +119,46 @@
   // ====== CONFIGURACIÓN ======
   // Listas por defecto (proyecto público iptv-org). Se combinan y se quitan repetidos.
   // En Ajustes puedes poner tus propias listas separadas por espacio o coma.
+  // 1) Español: México, Latinoamérica y España + categorías de entretenimiento + Free-TV
   var LISTA_DEFECTO = [
     "https://iptv-org.github.io/iptv/countries/mx.m3u",
+    "https://iptv-org.github.io/iptv/countries/ar.m3u",
+    "https://iptv-org.github.io/iptv/countries/co.m3u",
+    "https://iptv-org.github.io/iptv/countries/cl.m3u",
+    "https://iptv-org.github.io/iptv/countries/pe.m3u",
+    "https://iptv-org.github.io/iptv/countries/ve.m3u",
+    "https://iptv-org.github.io/iptv/countries/ec.m3u",
+    "https://iptv-org.github.io/iptv/countries/uy.m3u",
+    "https://iptv-org.github.io/iptv/countries/py.m3u",
+    "https://iptv-org.github.io/iptv/countries/bo.m3u",
+    "https://iptv-org.github.io/iptv/countries/cr.m3u",
+    "https://iptv-org.github.io/iptv/countries/gt.m3u",
+    "https://iptv-org.github.io/iptv/countries/hn.m3u",
+    "https://iptv-org.github.io/iptv/countries/sv.m3u",
+    "https://iptv-org.github.io/iptv/countries/ni.m3u",
+    "https://iptv-org.github.io/iptv/countries/pa.m3u",
+    "https://iptv-org.github.io/iptv/countries/do.m3u",
+    "https://iptv-org.github.io/iptv/countries/pr.m3u",
+    "https://iptv-org.github.io/iptv/countries/cu.m3u",
+    "https://iptv-org.github.io/iptv/countries/es.m3u",
     "https://iptv-org.github.io/iptv/languages/spa.m3u",
-    "https://iptv-org.github.io/iptv/categories/movies.m3u"
+    "https://iptv-org.github.io/iptv/categories/movies.m3u",
+    "https://iptv-org.github.io/iptv/categories/series.m3u",
+    "https://iptv-org.github.io/iptv/categories/kids.m3u",
+    "https://iptv-org.github.io/iptv/categories/animation.m3u",
+    "https://iptv-org.github.io/iptv/categories/sports.m3u",
+    "https://iptv-org.github.io/iptv/categories/music.m3u",
+    "https://iptv-org.github.io/iptv/categories/documentary.m3u",
+    "https://iptv-org.github.io/iptv/categories/comedy.m3u",
+    "https://iptv-org.github.io/iptv/categories/classic.m3u",
+    "https://iptv-org.github.io/iptv/categories/family.m3u",
+    "https://iptv-org.github.io/iptv/categories/entertainment.m3u",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
+  ].join(" ");
+  // 2) Todo el mundo (miles de canales; tarda más en cargar y revisar)
+  var LISTA_MUNDIAL = [
+    "https://iptv-org.github.io/iptv/index.m3u",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
   ].join(" ");
   var FILAS_VISIBLES = 11;
   var HORAS_CACHE = 12;          // cuánto tiempo recordar qué canales están caídos
@@ -148,7 +185,7 @@
   var ajustes = document.getElementById("ajustes");
   var urlInput = document.getElementById("urlInput");
   var focoAjustes = 0;
-  var elemsAjustes = [urlInput, document.getElementById("btnGuardar"), document.getElementById("btnDefecto"), document.getElementById("btnReiniciar"), document.getElementById("btnCerrar")];
+  var elemsAjustes = [urlInput, document.getElementById("btnGuardar"), document.getElementById("btnDefecto"), document.getElementById("btnMundial"), document.getElementById("btnReiniciar"), document.getElementById("btnCerrar")];
 
   function leer(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }
   function guardar(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -170,7 +207,7 @@
         var coma = l.lastIndexOf(",");
         var g = (attr("group-title") || "Otros").split(";")[0];
         info = { nombre: coma >= 0 ? l.slice(coma + 1).trim() : "Canal", logo: attr("tvg-logo"),
-                 grupo: TRADUCCION[g] || g, mx: /countries\/mx/.test(origen) };
+                 grupo: TRADUCCION[g] || g, mx: /countries\/mx/.test(origen) || /m[eé]xico/i.test(g) };
       } else if (l[0] !== "#" && info) {
         info.url = l; res.push(info); info = null;
       }
@@ -187,8 +224,11 @@
     lista_.forEach(function (u, n) {
       var xhr = new XMLHttpRequest();
       xhr.open("GET", u, true);
-      xhr.onload = function () { if (xhr.status >= 200 && xhr.status < 300) resultados[n] = parsearM3U(xhr.responseText, u); listo(); };
-      xhr.onerror = listo;
+      var hecho = false;
+      function fin() { if (hecho) return; hecho = true; listo(); }
+      xhr.onload = function () { if (xhr.status >= 200 && xhr.status < 300) resultados[n] = parsearM3U(xhr.responseText, u); fin(); };
+      xhr.onerror = fin;
+      setTimeout(function () { if (!hecho) { try { xhr.abort(); } catch (e) {} fin(); } }, 25000); // una lista lenta no detiene a las demás
       xhr.send();
     });
     function listo() {
@@ -542,8 +582,9 @@
     if (focoAjustes === 0) { urlInput.focus(); return; }
     if (focoAjustes === 1) { guardar("listaURL", urlInput.value.trim()); cerrarAjustes(); cargarLista(urlInput.value.trim()); }
     if (focoAjustes === 2) { guardar("listaURL", LISTA_DEFECTO); cerrarAjustes(); cargarLista(LISTA_DEFECTO); }
-    if (focoAjustes === 3) { guardar("caidos", "{}"); cerrarAjustes(); cargarLista(leer("listaURL", LISTA_DEFECTO)); }
-    if (focoAjustes === 4) cerrarAjustes();
+    if (focoAjustes === 3) { guardar("listaURL", LISTA_MUNDIAL); cerrarAjustes(); cargarLista(LISTA_MUNDIAL); }
+    if (focoAjustes === 4) { guardar("caidos", "{}"); cerrarAjustes(); cargarLista(leer("listaURL", LISTA_DEFECTO)); }
+    if (focoAjustes === 5) cerrarAjustes();
   }
   elemsAjustes.forEach(function (e, i) { e.addEventListener("click", function () { focoAjustes = i; accionAjustes(); }); });
 
@@ -635,6 +676,8 @@
   });
 
   // ====== Inicio ======
+  // Si venías de una versión anterior, actualiza a las nuevas listas
+  if (leer("versionListas", "") !== "3") { guardar("listaURL", LISTA_DEFECTO); guardar("versionListas", "3"); }
   cargarLista(leer("listaURL", LISTA_DEFECTO));
   mostrarBarra();
 })();
