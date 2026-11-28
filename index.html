@@ -87,6 +87,7 @@
   <button class="btn" id="bAnt" tabindex="0">◀ CH −</button>
   <button class="btn" id="bLista" tabindex="0">☰ Canales</button>
   <button class="btn" id="bSig" tabindex="0">CH + ▶</button>
+  <button class="btn" id="bInfo" tabindex="0" style="min-width:130px">ℹ</button>
   <button class="btn" id="bAjustes" tabindex="0" style="min-width:130px">⚙</button>
 </div>
 
@@ -215,52 +216,60 @@
   }
 
   // ====== Reproducción ======
-  // Configuración pensada para TVs con poca memoria y transmisiones largas:
-  // - backBufferLength: libera el video ya visto (evita que la memoria se llene y empiecen las pausas)
-  // - liveSyncDurationCount: reproduce un poco más atrás del "en vivo" para tener colchón
-  // - reintentos altos ante cortes de red
+  // ====== Reproducción con colchón (búfer) ======
+  // Idea: en lugar de reproducir "al ritmo en que llega", la app junta varios segundos
+  // por adelantado y vigila que ese colchón no se acabe.
+  var COLCHON_INICIAL = 15;  // segundos a juntar antes de empezar
+  var COLCHON_MINIMO  = 4;   // si baja de aquí, pausa una vez y rellena
+  var COLCHON_RELLENO = 20;  // hasta cuánto rellenar tras una pausa
+  var COLCHON_LENTO   = 10;  // por debajo de esto reproduce 3% más lento (imperceptible) para recuperar
+
   var CONFIG_HLS = {
     enableWorker: true,
     lowLatencyMode: false,
-    maxBufferLength: 30,
-    maxMaxBufferLength: 60,
-    maxBufferSize: 40 * 1000 * 1000,
-    backBufferLength: 20,
+    startFragPrefetch: true,
+    maxBufferLength: 60,
+    maxMaxBufferLength: 120,
+    maxBufferSize: 60 * 1000 * 1000,
+    backBufferLength: 10,            // libera lo ya visto para no llenar la memoria de la TV
     maxBufferHole: 0.5,
     nudgeMaxRetry: 10,
-    liveSyncDurationCount: 4,
-    liveMaxLatencyDurationCount: 12,
+    liveSyncDuration: 30,            // reproduce 30 s atrás del "en vivo" = más colchón
+    liveMaxLatencyDuration: 600,     // nunca brinca hacia adelante (eso se comía el colchón)
+    maxLiveSyncPlaybackRate: 1,
     capLevelToPlayerSize: true,
     abrEwmaDefaultEstimate: 1500000,
-    abrBandWidthFactor: 0.8,
-    abrBandWidthUpFactor: 0.6,
+    abrBandWidthFactor: 0.75,
+    abrBandWidthUpFactor: 0.5,
     manifestLoadingMaxRetry: 6,
     levelLoadingMaxRetry: 8,
     fragLoadingMaxRetry: 8,
     fragLoadingRetryDelay: 1000
   };
 
-  var canalActual = null, reintentosRed = 0, ultimoTiempo = 0, segundosAtorado = 0, nivelRescate = 0;
+  var canalActual = null, reintentosRed = 0, ultimoTiempo = 0, segundosAtorado = 0;
+  var rellenando = false, esperaInicio = 0, pausasRecientes = [], verInfo = false;
 
   function reproducir(i) {
     var c = filtrados[i]; if (!c) return;
     activo = canales.indexOf(c);
     guardar("ultimoCanal", String(i));
-    canalActual = c; reintentosRed = 0; nivelRescate = 0;
+    canalActual = c; reintentosRed = 0; pausasRecientes = [];
     iniciarStream(c);
     mostrarBanner(c); pintarLista();
   }
 
   function iniciarStream(c) {
     if (hls) { hls.destroy(); hls = null; }
-    mostrarEstado("Conectando a " + c.nombre + "…");
+    video.playbackRate = 1;
     ultimoTiempo = 0; segundosAtorado = 0;
+    rellenando = true; esperaInicio = Date.now();   // empieza juntando colchón
+    mostrarEstado("Conectando a " + c.nombre + "…");
     var esHls = /\.m3u8(\?|$)/i.test(c.url);
     if (esHls && window.Hls && Hls.isSupported()) {
       hls = new Hls(CONFIG_HLS);
       hls.loadSource(c.url);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, function () { intentarPlay(); });
       hls.on(Hls.Events.FRAG_LOADED, function () { reintentosRed = 0; });
       hls.on(Hls.Events.ERROR, function (e, d) {
         if (!d.fatal) return;
@@ -277,8 +286,9 @@
       });
     } else {
       video.src = c.url; // HLS nativo del navegador o MP4
-      intentarPlay();
+      video.preload = "auto";
     }
+    video.pause();
   }
 
   function intentarPlay() {
@@ -286,47 +296,102 @@
     if (p && p.catch) p.catch(function () {});
   }
 
-  // Indicadores de carga
-  video.addEventListener("waiting", function () { mostrarEstado("Cargando…"); });
-  video.addEventListener("playing", function () { estado.style.display = "none"; nivelRescate = 0; });
+  // Segundos ya descargados por delante de lo que se está viendo
+  function colchon() {
+    var b = video.buffered, t = video.currentTime;
+    for (var i = 0; i < b.length; i++) {
+      if (t >= b.start(i) - 0.5 && t <= b.end(i) + 0.5) return Math.max(0, b.end(i) - t);
+    }
+    return 0;
+  }
 
-  // ====== Vigilante anti-pausas ======
-  // Cada segundo revisa si el video avanzó. Si se queda atorado, lo rescata por pasos:
-  // 1) saltar al punto "en vivo"  2) recargar fragmentos  3) reiniciar el canal completo
-  setInterval(function () {
-    if (!canalActual || video.paused && video.readyState > 2) return;
-    var t = video.currentTime;
-    if (Math.abs(t - ultimoTiempo) < 0.05) segundosAtorado++;
-    else { segundosAtorado = 0; ultimoTiempo = t; return; }
-    ultimoTiempo = t;
-
-    if (segundosAtorado === 4) {
-      nivelRescate++;
-      if (nivelRescate === 1) {
-        // Saltar al punto en vivo o brincar el hueco del búfer
-        if (hls && hls.liveSyncPosition) video.currentTime = hls.liveSyncPosition;
-        else if (video.buffered.length) video.currentTime = video.buffered.end(video.buffered.length - 1) - 2;
-        intentarPlay();
-      } else if (nivelRescate === 2 && hls) {
-        hls.stopLoad(); hls.startLoad(-1); intentarPlay();
-      } else {
-        mostrarEstado("Reiniciando canal…");
-        iniciarStream(canalActual);
-        nivelRescate = 0;
+  // Si hubo 2 pausas en 5 minutos, baja un nivel de calidad
+  function registrarPausa() {
+    var ahora = Date.now();
+    pausasRecientes.push(ahora);
+    pausasRecientes = pausasRecientes.filter(function (x) { return ahora - x < 300000; });
+    if (pausasRecientes.length >= 2 && hls && hls.levels && hls.levels.length > 1) {
+      var actual = hls.currentLevel >= 0 ? hls.currentLevel : hls.levels.length - 1;
+      var tope = hls.autoLevelCapping < 0 ? actual : hls.autoLevelCapping;
+      if (tope > 0) {
+        hls.autoLevelCapping = tope - 1;
+        mostrarEstado("Bajando calidad para evitar pausas", 3000);
+        pausasRecientes = [];
       }
-      segundosAtorado = 0;
+    }
+  }
+
+  // Al llegar al punto donde empieza el búfer (p. ej. tras cambiar de canal)
+  function alinearInicio() {
+    var b = video.buffered;
+    if (b.length && (video.currentTime < b.start(0) || video.currentTime > b.end(b.length - 1))) {
+      video.currentTime = b.start(0) + 0.1;
+    }
+  }
+
+  // ====== Controlador del colchón (cada medio segundo) ======
+  setInterval(function () {
+    if (!canalActual) return;
+    var c = colchon();
+
+    if (rellenando) {
+      alinearInicio();
+      var meta = video.currentTime > 1 ? COLCHON_RELLENO : COLCHON_INICIAL;
+      var esperado = (Date.now() - esperaInicio) / 1000;
+      // Arranca al tener el colchón, o tras 25 s de espera con lo que haya (mínimo 3 s)
+      if (c >= meta || (esperado > 25 && c >= 3)) {
+        rellenando = false; video.playbackRate = 1;
+        estado.style.display = "none";
+        intentarPlay();
+      } else if (!verInfo) {
+        mostrarEstado("Cargando… " + Math.floor(Math.min(100, c / meta * 100)) + "%");
+      }
+    } else {
+      if (c < COLCHON_MINIMO && !video.ended) {
+        // Una pausa más larga pero única, en lugar de muchos cortes pequeños
+        rellenando = true; esperaInicio = Date.now();
+        video.pause(); registrarPausa();
+      } else if (c < COLCHON_LENTO) {
+        video.playbackRate = 0.97;
+      } else if (c > COLCHON_LENTO + 5) {
+        video.playbackRate = 1;
+      }
+    }
+
+    if (verInfo) {
+      var nivel = hls && hls.levels && hls.levels[hls.currentLevel];
+      mostrarEstado("Colchón: " + c.toFixed(1) + " s · " + (nivel ? nivel.height + "p" : "auto") +
+        " · velocidad " + video.playbackRate + (rellenando ? " · rellenando" : ""));
+    }
+  }, 500);
+
+  // ====== Vigilante: si el video se congela con colchón disponible ======
+  setInterval(function () {
+    if (!canalActual || rellenando || video.paused) { segundosAtorado = 0; return; }
+    var t = video.currentTime;
+    if (Math.abs(t - ultimoTiempo) < 0.05) segundosAtorado++; else segundosAtorado = 0;
+    ultimoTiempo = t;
+    if (segundosAtorado === 4) {
+      // Brinca el hueco en el búfer
+      var b = video.buffered;
+      for (var i = 0; i < b.length; i++) if (b.start(i) > t) { video.currentTime = b.start(i) + 0.1; break; }
+      intentarPlay();
+    } else if (segundosAtorado >= 10) {
+      mostrarEstado("Reiniciando canal…");
+      iniciarStream(canalActual);
     }
   }, 1000);
 
-  // Si la TV pone la pestaña en segundo plano y regresa, retomar en vivo
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && canalActual) {
-      if (hls && hls.liveSyncPosition) video.currentTime = hls.liveSyncPosition;
-      intentarPlay();
-    }
+  video.addEventListener("error", function () {
+    if (canalActual) { mostrarEstado("Error, reintentando…"); setTimeout(function () { iniciarStream(canalActual); }, 3000); }
   });
-  video.addEventListener("playing", function () { estado.style.display = "none"; });
-  video.addEventListener("error", function () { mostrarEstado("Canal no disponible ahora", 4000); });
+
+  // Al volver de segundo plano, juntar colchón de nuevo
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && canalActual) { rellenando = true; esperaInicio = Date.now(); }
+  });
+
+  function alternarInfo() { verInfo = !verInfo; if (!verInfo) estado.style.display = "none"; }
 
   function cambiarCanal(d) {
     if (!filtrados.length) return;
@@ -393,6 +458,7 @@
     else if (es(k, K.CH_UP)) cambiarCanal(1);
     else if (es(k, K.CH_DOWN)) cambiarCanal(-1);
     else if (es(k, K.RED) || k === K.ZERO) abrirAjustes();
+    else if (k === 406 || k === 73) alternarInfo();
     else if (es(k, K.BACK)) { if (panelVisible) ocultarPanel(); else return; } // deja salir de la app
     else return;
     e.preventDefault();
@@ -413,6 +479,7 @@
   enClic("bSig", function () { cambiarCanal(1); });
   enClic("bLista", function () { if (panel.classList.contains("oculto")) mostrarPanel(); else ocultarPanel(); });
   enClic("bAjustes", abrirAjustes);
+  enClic("bInfo", alternarInfo);
   enClic("bArriba", function () { sel = Math.max(0, sel - (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
   enClic("bAbajo", function () { sel = Math.min(filtrados.length - 1, sel + (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
   enClic("bGrupoAnt", function () { grupoIdx = (grupoIdx - 1 + grupos.length) % grupos.length; aplicarFiltro(); mostrarPanel(); });
