@@ -87,6 +87,7 @@
   <button class="btn" id="bAnt" tabindex="0">◀ CH −</button>
   <button class="btn" id="bLista" tabindex="0">☰ Canales</button>
   <button class="btn" id="bSig" tabindex="0">CH + ▶</button>
+  <button class="btn" id="bBuscar" tabindex="0" style="min-width:130px">🔍</button>
   <button class="btn" id="bInfo" tabindex="0" style="min-width:130px">ℹ</button>
   <button class="btn" id="bAjustes" tabindex="0" style="min-width:130px">⚙</button>
 </div>
@@ -94,13 +95,20 @@
 <div id="banner"><span class="num"></span><span class="nom"></span></div>
 <div id="estado"></div>
 
+<div id="buscador" style="position:absolute;top:40px;left:50%;transform:translateX(-50%);display:none;gap:16px;background:rgba(10,12,20,.95);padding:24px;border-radius:16px">
+  <input id="qInput" type="text" placeholder="Buscar canal… (ej. estrellas, cine)" style="width:900px;font-size:34px;padding:16px 20px;border-radius:10px;border:3px solid #3fa9ff;background:#111;color:#fff">
+  <button class="btn" id="bLimpiar" style="height:80px;min-width:0">Borrar</button>
+  <button class="btn" id="bCerrarBus" style="height:80px;min-width:0">Listo</button>
+</div>
+
 <div id="ajustes">
   <h2>Ajustes de lista</h2>
-  <p>Escribe la URL de una lista M3U de canales que tengas derecho a ver (por ejemplo, transmisiones oficiales y gratuitas de las propias televisoras).</p>
+  <p>URLs de listas M3U separadas por espacio. Se combinan y se quitan repetidos. Usa solo transmisiones que tengas derecho a ver.</p>
   <input id="urlInput" type="text" spellcheck="false">
   <div class="botones">
     <button id="btnGuardar">Guardar y cargar</button>
-    <button id="btnDefecto">Lista por defecto</button>
+    <button id="btnDefecto">Listas por defecto</button>
+    <button id="btnReiniciar">Volver a revisar todos</button>
     <button id="btnCerrar">Cerrar</button>
   </div>
 </div>
@@ -108,9 +116,25 @@
 <script>
 (function () {
   // ====== CONFIGURACIÓN ======
-  // Lista por defecto: canales de México del proyecto público iptv-org (solo enlaces de acceso libre).
-  var LISTA_DEFECTO = "https://iptv-org.github.io/iptv/countries/mx.m3u";
+  // Listas por defecto (proyecto público iptv-org). Se combinan y se quitan repetidos.
+  // En Ajustes puedes poner tus propias listas separadas por espacio o coma.
+  var LISTA_DEFECTO = [
+    "https://iptv-org.github.io/iptv/countries/mx.m3u",
+    "https://iptv-org.github.io/iptv/languages/spa.m3u",
+    "https://iptv-org.github.io/iptv/categories/movies.m3u"
+  ].join(" ");
   var FILAS_VISIBLES = 11;
+  var HORAS_CACHE = 12;          // cuánto tiempo recordar qué canales están caídos
+
+  // Nombres de categoría en español
+  var TRADUCCION = { "General": "General", "News": "Noticias", "Movies": "Películas", "Series": "Series",
+    "Entertainment": "Entretenimiento", "Kids": "Infantil", "Animation": "Animación", "Sports": "Deportes",
+    "Music": "Música", "Comedy": "Comedia", "Documentary": "Documentales", "Religious": "Religión",
+    "Education": "Educación", "Culture": "Cultura", "Lifestyle": "Estilo de vida", "Cooking": "Cocina",
+    "Family": "Familia", "Classic": "Clásicos", "Local": "Locales", "Legislative": "Gobierno",
+    "Business": "Negocios", "Science": "Ciencia", "Travel": "Viajes", "Shop": "Compras",
+    "Weather": "Clima", "Outdoor": "Aire libre", "Auto": "Autos", "Relax": "Relajación",
+    "Undefined": "Otros", "Other": "Otros" };
 
   // ====== Estado ======
   var canales = [], grupos = ["Todos"], grupoIdx = 0, filtrados = [];
@@ -124,7 +148,7 @@
   var ajustes = document.getElementById("ajustes");
   var urlInput = document.getElementById("urlInput");
   var focoAjustes = 0;
-  var elemsAjustes = [urlInput, document.getElementById("btnGuardar"), document.getElementById("btnDefecto"), document.getElementById("btnCerrar")];
+  var elemsAjustes = [urlInput, document.getElementById("btnGuardar"), document.getElementById("btnDefecto"), document.getElementById("btnReiniciar"), document.getElementById("btnCerrar")];
 
   function leer(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } }
   function guardar(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -136,7 +160,7 @@
   }
 
   // ====== Parser M3U ======
-  function parsearM3U(texto) {
+  function parsearM3U(texto, origen) {
     var lineas = texto.split(/\r?\n/), res = [], info = null;
     for (var i = 0; i < lineas.length; i++) {
       var l = lineas[i].trim();
@@ -144,8 +168,9 @@
       if (l.indexOf("#EXTINF") === 0) {
         var attr = function (n) { var m = l.match(new RegExp(n + '="([^"]*)"')); return m ? m[1] : ""; };
         var coma = l.lastIndexOf(",");
+        var g = (attr("group-title") || "Otros").split(";")[0];
         info = { nombre: coma >= 0 ? l.slice(coma + 1).trim() : "Canal", logo: attr("tvg-logo"),
-                 grupo: (attr("group-title") || "Otros").split(";")[0] };
+                 grupo: TRADUCCION[g] || g, mx: /countries\/mx/.test(origen) };
       } else if (l[0] !== "#" && info) {
         info.url = l; res.push(info); info = null;
       }
@@ -153,40 +178,132 @@
     return res;
   }
 
-  function cargarLista(url) {
+  // Descarga varias listas y las combina sin repetidos (México primero)
+  function cargarLista(urls) {
+    var lista_ = String(urls).split(/[\s,]+/).filter(function (u) { return u; });
+    var pendientes = lista_.length, resultados = [];
+    if (!pendientes) { mostrarEstado("No hay listas configuradas"); return; }
     mostrarEstado("Cargando canales…");
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", url, true);
-    xhr.onload = function () {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        canales = parsearM3U(xhr.responseText);
-        grupoIdx = 0; rehacerGrupos();
-        mostrarEstado(canales.length + " canales cargados", 2500);
-        var ultimo = parseInt(leer("ultimoCanal", "0"), 10) || 0;
-        if (filtrados.length) { sel = Math.min(ultimo, filtrados.length - 1); reproducir(sel); }
-        mostrarPanel();
-      } else mostrarEstado("Error al cargar la lista (" + xhr.status + ")");
-    };
-    xhr.onerror = function () { mostrarEstado("No se pudo descargar la lista. Revisa la URL o tu conexión."); };
-    xhr.send();
+    lista_.forEach(function (u, n) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", u, true);
+      xhr.onload = function () { if (xhr.status >= 200 && xhr.status < 300) resultados[n] = parsearM3U(xhr.responseText, u); listo(); };
+      xhr.onerror = listo;
+      xhr.send();
+    });
+    function listo() {
+      if (--pendientes > 0) return;
+      var vistos = {}, caidos = leerCaidos(), todos = [];
+      resultados.forEach(function (r) {
+        (r || []).forEach(function (c) {
+          if (vistos[c.url]) { if (c.mx) vistos[c.url].mx = true; return; }
+          vistos[c.url] = c;
+          if (!caidos[c.url]) todos.push(c);
+        });
+      });
+      if (!todos.length) { mostrarEstado("No se pudo descargar ninguna lista. Revisa tu conexión."); return; }
+      canales = todos;
+      grupoIdx = 0; rehacerGrupos();
+      mostrarEstado(canales.length + " canales cargados", 2500);
+      var ultimo = parseInt(leer("ultimoCanal", "0"), 10) || 0;
+      if (filtrados.length) { sel = Math.min(ultimo, filtrados.length - 1); reproducir(sel); }
+      mostrarPanel();
+      // Revisa en segundo plano, sin interrumpir lo que estás viendo
+      setTimeout(verificarEnFondo, 5000);
+    }
+  }
+
+  // ====== Verificación en segundo plano ======
+  // Prueba cada canal (solo descarga su índice, muy poco dato) y quita los que no responden.
+  // Recuerda los caídos unas horas para que la próxima vez abra más rápido.
+  function leerCaidos() {
+    try {
+      var d = JSON.parse(leer("caidos", "{}"));
+      if (!d.t || Date.now() - d.t > HORAS_CACHE * 3600000) return {};
+      return d.u || {};
+    } catch (e) { return {}; }
+  }
+  function guardarCaidos(mapa) { guardar("caidos", JSON.stringify({ t: Date.now(), u: mapa })); }
+
+  function probarCanal(c, listo) {
+    var terminado = false, xhr = new XMLHttpRequest();
+    function fin(ok) { if (terminado) return; terminado = true; clearTimeout(t); try { xhr.abort(); } catch (e) {} listo(ok); }
+    var t = setTimeout(function () { fin(false); }, 10000);
+    var esLista = /\.m3u8(\?|$)/i.test(c.url);
+    try {
+      xhr.open("GET", c.url, true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState < 2) return;
+        if (!(xhr.status >= 200 && xhr.status < 400)) { fin(false); return; }
+        if (!esLista) { fin(true); return; }
+        if (xhr.readyState === 4) fin((xhr.responseText || "").indexOf("#EXTM3U") >= 0);
+      };
+      xhr.onerror = function () { fin(false); };
+      xhr.send();
+    } catch (e) { fin(false); }
+  }
+
+  var verificando = false;
+  function verificarEnFondo() {
+    if (verificando) return;
+    verificando = true;
+    var cola = canales.slice(), caidos = leerCaidos(), quitados = 0, activos = 0;
+    function siguiente() {
+      if (!cola.length) {
+        if (activos === 0) {
+          verificando = false;
+          guardarCaidos(caidos);
+          if (quitados) mostrarEstado("Se quitaron " + quitados + " canales que no funcionan", 4000);
+        }
+        return;
+      }
+      var c = cola.shift();
+      if (c === canalActual) { siguiente(); return; }   // el que estás viendo no se toca
+      activos++;
+      probarCanal(c, function (ok) {
+        activos--;
+        if (!ok) {
+          caidos[c.url] = 1; quitados++;
+          var i = canales.indexOf(c);
+          if (i >= 0) {
+            canales.splice(i, 1);
+            if (activo > i) activo--;
+            var j = filtrados.indexOf(c);
+            if (j >= 0) { filtrados.splice(j, 1); if (sel >= j && sel > 0) sel--; }
+            if (!panel.classList.contains("oculto")) pintarLista();
+          }
+        }
+        setTimeout(siguiente, 150);  // poco a poco, para no robar internet al video
+      });
+    }
+    for (var k = 0; k < 3; k++) siguiente();
   }
 
   function rehacerGrupos() {
     var g = {}; canales.forEach(function (c) { g[c.grupo] = 1; });
-    grupos = ["Todos"].concat(Object.keys(g).sort());
+    var hayMx = canales.some(function (c) { return c.mx; });
+    grupos = ["Todos"].concat(hayMx ? ["México"] : [], g["Películas"] ? ["Películas"] : [],
+      Object.keys(g).filter(function (x) { return x !== "Películas"; }).sort());
     if (grupoIdx >= grupos.length) grupoIdx = 0;
     aplicarFiltro();
   }
 
+  var busqueda = "";
+  function sinAcentos(s) { return String(s).toLowerCase().replace(/[áàä]/g, "a").replace(/[éèë]/g, "e").replace(/[íìï]/g, "i").replace(/[óòö]/g, "o").replace(/[úùü]/g, "u"); }
   function aplicarFiltro() {
-    var g = grupos[grupoIdx];
-    filtrados = g === "Todos" ? canales : canales.filter(function (c) { return c.grupo === g; });
+    var g = grupos[grupoIdx], q = sinAcentos(busqueda.trim());
+    filtrados = canales.filter(function (c) {
+      if (g === "México" && !c.mx) return false;
+      if (g !== "Todos" && g !== "México" && c.grupo !== g) return false;
+      if (q && sinAcentos(c.nombre).indexOf(q) < 0) return false;
+      return true;
+    });
     sel = 0; pintarLista();
   }
 
   // ====== Render ======
   function pintarLista() {
-    grupoEl.innerHTML = "◀ <b>" + grupos[grupoIdx] + "</b> ▶ &nbsp;(" + filtrados.length + ")";
+    grupoEl.innerHTML = "◀ <b>" + grupos[grupoIdx] + "</b> ▶ &nbsp;(" + filtrados.length + ")" + (busqueda ? " · 🔍 \"" + esc(busqueda) + "\"" : "");
     var inicio = Math.max(0, Math.min(sel - Math.floor(FILAS_VISIBLES / 2), filtrados.length - FILAS_VISIBLES));
     var html = "";
     for (var i = inicio; i < Math.min(filtrados.length, inicio + FILAS_VISIBLES); i++) {
@@ -425,7 +542,8 @@
     if (focoAjustes === 0) { urlInput.focus(); return; }
     if (focoAjustes === 1) { guardar("listaURL", urlInput.value.trim()); cerrarAjustes(); cargarLista(urlInput.value.trim()); }
     if (focoAjustes === 2) { guardar("listaURL", LISTA_DEFECTO); cerrarAjustes(); cargarLista(LISTA_DEFECTO); }
-    if (focoAjustes === 3) cerrarAjustes();
+    if (focoAjustes === 3) { guardar("caidos", "{}"); cerrarAjustes(); cargarLista(leer("listaURL", LISTA_DEFECTO)); }
+    if (focoAjustes === 4) cerrarAjustes();
   }
   elemsAjustes.forEach(function (e, i) { e.addEventListener("click", function () { focoAjustes = i; accionAjustes(); }); });
 
@@ -480,6 +598,15 @@
   enClic("bLista", function () { if (panel.classList.contains("oculto")) mostrarPanel(); else ocultarPanel(); });
   enClic("bAjustes", abrirAjustes);
   enClic("bInfo", alternarInfo);
+  var buscador = document.getElementById("buscador"), qInput = document.getElementById("qInput");
+  enClic("bBuscar", function () { buscador.style.display = "flex"; qInput.value = busqueda; qInput.focus(); mostrarPanel(); });
+  enClic("bLimpiar", function () { qInput.value = ""; busqueda = ""; aplicarFiltro(); mostrarPanel(); qInput.focus(); });
+  enClic("bCerrarBus", function () { buscador.style.display = "none"; qInput.blur(); mostrarPanel(); });
+  qInput.addEventListener("input", function () { busqueda = qInput.value; aplicarFiltro(); mostrarPanel(); });
+  qInput.addEventListener("keydown", function (e) {
+    e.stopPropagation();
+    if (e.keyCode === 13) { buscador.style.display = "none"; qInput.blur(); mostrarPanel(); }
+  });
   enClic("bArriba", function () { sel = Math.max(0, sel - (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
   enClic("bAbajo", function () { sel = Math.min(filtrados.length - 1, sel + (FILAS_VISIBLES - 1)); pintarLista(); mostrarPanel(); });
   enClic("bGrupoAnt", function () { grupoIdx = (grupoIdx - 1 + grupos.length) % grupos.length; aplicarFiltro(); mostrarPanel(); });
